@@ -1,0 +1,14 @@
+name: pbi-aibi-migrator
+description: "Power BI (.pbit) to Databricks AI/BI migration assistant"
+
+command:
+  - "streamlit"
+  - "run"
+  - "app.py"
+
+env:
+  - name: STREAMLIT_SERVER_HEADLESS
+    value: "true"
+  - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+    value: "false"
+  # Auth: Databricks Apps injects user identity; do not put secrets in this file.

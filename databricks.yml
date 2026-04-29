@@ -1,0 +1,12 @@
+bundle:
+  name: aibi-migrator
+
+include:
+  - resources/*.yml
+
+targets:
+  default:
+    default: true
+    mode: development
+    workspace:
+      host: https://fevm-estebanc-experiments.cloud.databricks.com

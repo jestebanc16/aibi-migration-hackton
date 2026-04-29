@@ -1,0 +1,9 @@
+# Databricks Apps resource (DABs). Requires CLI >= 0.239.
+# https://docs.databricks.com/aws/en/dev-tools/bundles/resources
+
+resources:
+  apps:
+    pbi_aibi_migrator:
+      name: "pbi-aibi-migrator-${bundle.target}"
+      description: "Power BI (.pbit) to Databricks AI/BI migration assistant"
+      source_code_path: ${workspace.file_path}
