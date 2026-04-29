@@ -27,10 +27,12 @@ def test_build_deploy_parity_manifest_all_mapped() -> None:
     m = build_deploy_parity_manifest(dashboard_display_name="Dash", visual_rows=rows)
     assert m.dashboard_display_name == "Dash"
     assert len(m.entries) == 2
-    assert all(e.target == ParityGapTarget.lakeview_multiline_intent for e in m.entries)
+    assert m.entries[0].target == ParityGapTarget.lakeview_multiline_intent
+    assert m.entries[1].target == ParityGapTarget.lakeview_table_preview
     assert m.entries[0].lakeview_widget_name
     lines = m.backlog_lines()
     assert any("lakeview_multiline_intent" in ln for ln in lines)
+    assert any("lakeview_table_preview" in ln for ln in lines)
     json.loads(m.model_dump_json())
 
 
@@ -87,6 +89,43 @@ def test_estate_rollup_merges_parity_backlog() -> None:
         parity_backlog_lines=["[deploy:x] extra line"],
     )
     assert any("[deploy:x]" in x for x in er.parity_validation_backlog)
+
+
+def test_parity_manifest_resolves_bar_with_two_columns() -> None:
+    rows = [
+        {
+            "visual_id": "c1",
+            "source_file": "x.pbit",
+            "report_name": "R",
+            "page_name": "P",
+            "visual_type": "columnChart",
+            "intent_statement": "trend",
+        }
+    ]
+    m = build_deploy_parity_manifest(
+        dashboard_display_name="D",
+        visual_rows=rows,
+        column_names=["a", "b"],
+    )
+    assert m.entries[0].target.value == "lakeview_bar_chart"
+
+
+def test_parity_manifest_chart_placeholder_with_one_column() -> None:
+    rows = [
+        {
+            "visual_id": "c1",
+            "report_name": "R",
+            "page_name": "P",
+            "visual_type": "barChart",
+            "intent_statement": "x",
+        }
+    ]
+    m = build_deploy_parity_manifest(
+        dashboard_display_name="D",
+        visual_rows=rows,
+        column_names=["only_one"],
+    )
+    assert m.entries[0].target == ParityGapTarget.lakeview_chart_placeholder
 
 
 def test_classifier_rebuild_plan_mentions_fidelity_manifest() -> None:

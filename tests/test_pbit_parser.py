@@ -42,3 +42,36 @@ def test_extract_utf16_datamodel():
         z.writestr("DataModelSchema", text.encode("utf-16"))
     m = extract_pbit_canonical("u16.pbit", buf.getvalue())
     assert m.tables[0].name == "T"
+
+
+def test_extract_report_layout_json_pages_and_positions():
+    model = {"model": {"tables": [{"name": "T", "columns": [{"name": "x"}], "measures": []}], "relationships": []}}
+    layout = {
+        "sections": [
+            {
+                "displayName": "Summary",
+                "visualContainers": [
+                    {
+                        "x": 10,
+                        "y": 20,
+                        "z": 0,
+                        "width": 600,
+                        "height": 200,
+                        "config": json.dumps(
+                            {"name": "v1", "singleVisual": {"visualType": "tableEx"}}
+                        ),
+                    }
+                ],
+            }
+        ]
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("DataModelSchema", json.dumps(model).encode("utf-8"))
+        z.writestr("Report/MyReport/Layout", json.dumps(layout).encode("utf-8"))
+    m = extract_pbit_canonical("with_layout.pbit", buf.getvalue())
+    assert len(m.visuals) == 1
+    v = m.visuals[0]
+    assert v.page_name == "Summary"
+    assert v.visual_type == "tableEx"
+    assert v.layout_x == 10 and v.layout_y == 20 and v.layout_w == 600 and v.layout_h == 200

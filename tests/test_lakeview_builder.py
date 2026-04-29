@@ -55,7 +55,71 @@ def test_build_migrated_dashboard_with_pbi_views_extra_pages() -> None:
     assert names[1] != names[2]
     assert d["pages"][1]["displayName"] == "Sales — Summary"
     assert d["pages"][2]["displayName"] == "Sales — Details"
+    # Details page uses tableEx-like mapping → Lakeview table on primary dataset.
+    detail_layout = d["pages"][2]["layout"]
+    table_widgets = [
+        w
+        for w in detail_layout
+        if w.get("widget", {}).get("spec", {}).get("widgetType") == "table"
+    ]
+    assert len(table_widgets) >= 1
     json.dumps(d)
+
+
+def test_build_migrated_dashboard_bar_chart_when_two_columns() -> None:
+    d = build_migrated_dashboard_with_pbi_views(
+        dashboard_title="T",
+        subtitle="S",
+        dataset_display_name="D",
+        dataset_name="primary",
+        starter_sql="SELECT `region`, `amt` FROM `c`.`s`.`t` LIMIT 10",
+        column_names=["region", "amt"],
+        visual_rows=[
+            {
+                "report_name": "R",
+                "page_name": "P",
+                "visual_type": "columnChart",
+                "intent_statement": "Trend",
+            }
+        ],
+    )
+    page = d["pages"][1]
+    bars = [
+        w
+        for w in page["layout"]
+        if w.get("widget", {}).get("spec", {}).get("widgetType") == "bar"
+    ]
+    assert len(bars) == 1
+    enc = bars[0]["widget"]["spec"]["encodings"]
+    assert enc["x"]["fieldName"] == "region"
+    assert enc["y"]["fieldName"] == "amt"
+
+
+def test_build_migrated_dashboard_chart_placeholder_when_one_column() -> None:
+    d = build_migrated_dashboard_with_pbi_views(
+        dashboard_title="T",
+        subtitle="S",
+        dataset_display_name="D",
+        dataset_name="primary",
+        starter_sql="SELECT `a` FROM `c`.`s`.`t` LIMIT 10",
+        column_names=["a"],
+        visual_rows=[
+            {
+                "report_name": "R",
+                "page_name": "P",
+                "visual_type": "columnChart",
+                "intent_statement": "Trend",
+            }
+        ],
+    )
+    page = d["pages"][1]
+    texts = [
+        w["widget"].get("multilineTextboxSpec", {}).get("lines", [])
+        for w in page["layout"]
+        if "multilineTextboxSpec" in w.get("widget", {})
+    ]
+    flat = "\n".join(" ".join(lines) for lines in texts)
+    assert "Chart placeholder" in flat
 
 
 def test_build_migrated_dashboard_with_pbi_views_empty_visuals() -> None:

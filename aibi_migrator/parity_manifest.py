@@ -14,7 +14,13 @@ from aibi_migrator.lakeview.dashboard_builder import (
     DEFAULT_MAX_VISUALS_PER_PAGE,
     _group_visual_rows,
     _lakeview_widget_name,
+    _row_sort_key,
     _unique_page_slug,
+)
+from aibi_migrator.visual_mapping import (
+    _trim_sql_columns,
+    parity_target_for_visual_type,
+    resolve_chart_parity_target,
 )
 
 
@@ -36,14 +42,17 @@ def build_deploy_parity_manifest(
     *,
     dashboard_display_name: str,
     visual_rows: list[dict[str, Any]] | None,
+    column_names: list[str] | None = None,
     max_extra_pages: int = DEFAULT_MAX_EXTRA_PAGES,
     max_visuals_per_page: int = DEFAULT_MAX_VISUALS_PER_PAGE,
 ) -> DeployParityManifest:
     """
     One ParityGapEntry per source visual row. Mirrors Lakeview builder caps so
-    ``lakeview_multiline_intent`` rows match widgets that were actually emitted.
+    mapped rows match widgets that were actually emitted. Chart targets depend on
+    ``column_names`` (primary binding) when provided.
     """
     rows = [r for r in (visual_rows or []) if isinstance(r, dict)]
+    n_cols = len(_trim_sql_columns(column_names))
     if not rows:
         return DeployParityManifest(
             dashboard_display_name=dashboard_display_name,
@@ -95,35 +104,44 @@ def build_deploy_parity_manifest(
                 f"{rpt} / {pg}: {truncated} visual(s) omitted from Lakeview: exceeded max_visuals_per_page ({max_visuals_per_page})."
             )
 
-        for i, row in enumerate(vrows):
-            if i >= max_visuals_per_page:
+        page_cap = vrows[:max_visuals_per_page]
+        sorted_page = sorted(page_cap, key=_row_sort_key)
+        for idx, row in enumerate(vrows):
+            if idx >= max_visuals_per_page:
                 entries.append(
                     ParityGapEntry(
                         source_file=(row.get("source_file") or None),
                         report_name=rpt,
                         page_name=pg,
-                        visual_id=_visual_id_for(row, rpt, pg, i),
+                        visual_id=_visual_id_for(row, rpt, pg, idx),
                         visual_type=(row.get("visual_type") or None),
                         target=ParityGapTarget.gap,
                         lakeview_widget_name=None,
                         gap_reason=f"Visual not placed on Lakeview page: exceeded max_visuals_per_page ({max_visuals_per_page}).",
                     )
                 )
+                continue
+            # Widget index follows layout sort order (same as dashboard_builder).
+            si = sorted_page.index(row)
+            wname = _lakeview_widget_name(slug, si + 1)
+            vt = row.get("visual_type") or None
+            base = parity_target_for_visual_type(vt)
+            if base == ParityGapTarget.lakeview_chart_placeholder:
+                tgt = resolve_chart_parity_target(vt, n_cols)
             else:
-                # Lakeview builder uses widget index 1..n for visuals (0 is page header).
-                wname = _lakeview_widget_name(slug, i + 1)
-                entries.append(
-                    ParityGapEntry(
-                        source_file=(row.get("source_file") or None),
-                        report_name=rpt,
-                        page_name=pg,
-                        visual_id=_visual_id_for(row, rpt, pg, i),
-                        visual_type=(row.get("visual_type") or None),
-                        target=ParityGapTarget.lakeview_multiline_intent,
-                        lakeview_widget_name=wname,
-                        gap_reason=None,
-                    )
+                tgt = base
+            entries.append(
+                ParityGapEntry(
+                    source_file=(row.get("source_file") or None),
+                    report_name=rpt,
+                    page_name=pg,
+                    visual_id=_visual_id_for(row, rpt, pg, idx),
+                    visual_type=(row.get("visual_type") or None),
+                    target=tgt,
+                    lakeview_widget_name=wname,
+                    gap_reason=None,
                 )
+            )
 
     return DeployParityManifest(
         dashboard_display_name=dashboard_display_name,

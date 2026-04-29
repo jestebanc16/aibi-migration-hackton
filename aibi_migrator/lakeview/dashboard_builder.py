@@ -6,6 +6,16 @@ import re
 from collections import defaultdict
 from typing import Any
 
+from aibi_migrator.canonical.models import ParityGapTarget
+from aibi_migrator.visual_mapping import (
+    _trim_sql_columns,
+    has_layout_bbox,
+    is_line_like_visual,
+    is_pie_like_visual,
+    parity_target_for_visual_type,
+    x_scale_type_for_line_axis,
+)
+
 # Kept in sync with parity manifest / RULES coverage caps.
 DEFAULT_MAX_EXTRA_PAGES = 28
 DEFAULT_MAX_VISUALS_PER_PAGE = 45
@@ -60,6 +70,231 @@ def _lakeview_name_part(s: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "-", (s or "").strip().lower()).strip("-")[:44] or "x"
 
 
+def _row_sort_key(row: dict[str, Any]) -> tuple[float, float, float]:
+    return (
+        float(row.get("layout_y") or 0.0),
+        float(row.get("layout_z") or 0.0),
+        float(row.get("layout_x") or 0.0),
+    )
+
+
+def _canvas_width_for_rows(vrows: list[dict[str, Any]]) -> float:
+    wmax = 0.0
+    for r in vrows:
+        if not has_layout_bbox(r):
+            continue
+        x = float(r.get("layout_x") or 0)
+        w = float(r.get("layout_w") or 0)
+        wmax = max(wmax, x + w)
+    return wmax if wmax > 1.0 else 1200.0
+
+
+def _bbox_to_grid_columns(row: dict[str, Any], canvas_w: float) -> tuple[int, int, int]:
+    """Map PBI x/width/height to Lakeview grid (6 columns wide). Returns (x, width, height)."""
+    x = float(row.get("layout_x") or 0)
+    w = float(row.get("layout_w") or canvas_w / 2)
+    h = float(row.get("layout_h") or 120)
+    canvas_w = max(canvas_w, 1.0)
+    xg = int((x / canvas_w) * 6)
+    xg = max(0, min(5, xg))
+    wg = int((w / canvas_w) * 6 + 0.45)
+    wg = max(1, min(6 - xg, wg))
+    hg = max(2, min(12, int(h / 110) + 1))
+    return xg, wg, hg
+
+
+def _table_widget_payload(
+    *,
+    name: str,
+    dataset_name: str,
+    column_names: list[str],
+) -> dict[str, Any]:
+    cols = [c for c in column_names if c and not str(c).startswith("#")][:48]
+    fields: list[dict[str, str]] = []
+    enc_cols: list[dict[str, str]] = []
+    for c in cols:
+        safe = str(c).replace("`", "``")
+        fields.append({"name": c, "expression": f"`{safe}`"})
+        enc_cols.append({"fieldName": c, "displayName": c})
+    return {
+        "name": name,
+        "queries": [
+            {
+                "name": "main_query",
+                "query": {
+                    "datasetName": dataset_name,
+                    "fields": fields,
+                    "disaggregated": True,
+                },
+            }
+        ],
+        "spec": {
+            "version": 2,
+            "widgetType": "table",
+            "encodings": {"columns": enc_cols},
+            "frame": {"title": "Data preview (primary binding)", "showTitle": True},
+        },
+    }
+
+
+def _intent_multiline_widget(name: str, vt: str, intent: str, src: str) -> dict[str, Any]:
+    lines = [f"**Visual type:** `{_safe_display_line(vt)}`", ""]
+    lines.append(intent if intent else "_No intent text extracted for this visual._")
+    if src:
+        lines.extend(["", f"_Source file: {src}_"])
+    return {"name": name, "multilineTextboxSpec": {"lines": lines}}
+
+
+def _chart_placeholder_widget(name: str, vt: str, intent: str, src: str) -> dict[str, Any]:
+    lines = [
+        f"**Chart placeholder** (`{_safe_display_line(vt)}`)",
+        "",
+        "Not enough columns on the primary bound table to build a chart (need at least two), "
+        "or the visual type is not mapped yet.",
+        "",
+        intent[:600] + ("…" if len(intent) > 600 else "") if intent else "_No intent extracted._",
+    ]
+    if src:
+        lines.extend(["", f"_Source file: {src}_"])
+    return {"name": name, "multilineTextboxSpec": {"lines": lines}}
+
+
+def _field_pair(col_x: str, col_y: str) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for c in (col_x, col_y):
+        safe = str(c).replace("`", "``")
+        out.append({"name": c, "expression": f"`{safe}`"})
+    return out
+
+
+def _chart_frame_title(intent: str, vt: str) -> str:
+    t = (intent or "").strip()
+    if len(t) > 100:
+        t = t[:97] + "…"
+    return t or _safe_display_line(vt) or "Chart"
+
+
+def _bar_chart_widget_payload(
+    *,
+    name: str,
+    dataset_name: str,
+    col_x: str,
+    col_y: str,
+    frame_title: str,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "queries": [
+            {
+                "name": "main_query",
+                "query": {
+                    "datasetName": dataset_name,
+                    "fields": _field_pair(col_x, col_y),
+                    "disaggregated": True,
+                },
+            }
+        ],
+        "spec": {
+            "version": 3,
+            "widgetType": "bar",
+            "encodings": {
+                "x": {
+                    "fieldName": col_x,
+                    "scale": {"type": "categorical"},
+                    "displayName": col_x,
+                },
+                "y": {
+                    "fieldName": col_y,
+                    "scale": {"type": "quantitative"},
+                    "displayName": col_y,
+                },
+            },
+            "frame": {"title": frame_title[:120], "showTitle": True},
+        },
+    }
+
+
+def _line_chart_widget_payload(
+    *,
+    name: str,
+    dataset_name: str,
+    col_x: str,
+    col_y: str,
+    frame_title: str,
+) -> dict[str, Any]:
+    x_scale = x_scale_type_for_line_axis(col_x)
+    return {
+        "name": name,
+        "queries": [
+            {
+                "name": "main_query",
+                "query": {
+                    "datasetName": dataset_name,
+                    "fields": _field_pair(col_x, col_y),
+                    "disaggregated": True,
+                },
+            }
+        ],
+        "spec": {
+            "version": 3,
+            "widgetType": "line",
+            "encodings": {
+                "x": {
+                    "fieldName": col_x,
+                    "scale": {"type": x_scale},
+                    "displayName": col_x,
+                },
+                "y": {
+                    "fieldName": col_y,
+                    "scale": {"type": "quantitative"},
+                    "displayName": col_y,
+                },
+            },
+            "frame": {"title": frame_title[:120], "showTitle": True},
+        },
+    }
+
+
+def _pie_chart_widget_payload(
+    *,
+    name: str,
+    dataset_name: str,
+    col_color: str,
+    col_angle: str,
+    frame_title: str,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "queries": [
+            {
+                "name": "main_query",
+                "query": {
+                    "datasetName": dataset_name,
+                    "fields": _field_pair(col_color, col_angle),
+                    "disaggregated": True,
+                },
+            }
+        ],
+        "spec": {
+            "version": 3,
+            "widgetType": "pie",
+            "encodings": {
+                "color": {
+                    "fieldName": col_color,
+                    "scale": {"type": "categorical"},
+                    "displayName": col_color,
+                },
+                "angle": {
+                    "fieldName": col_angle,
+                    "scale": {"type": "quantitative"},
+                    "displayName": col_angle,
+                },
+            },
+            "frame": {"title": frame_title[:120], "showTitle": True},
+        },
+    }
+
+
 def _group_visual_rows(
     visual_rows: list[dict[str, Any]],
 ) -> list[tuple[tuple[str, str], list[dict[str, Any]]]]:
@@ -90,8 +325,8 @@ def build_migrated_dashboard_with_pbi_views(
 ) -> dict[str, Any]:
     """
     Overview page (data preview) plus one Lakeview page per Power BI **report page** (grouped views),
-    each visual rendered as an intent card (type + extracted intent). No per-visual SQL yet (UC-bound
-    starter dataset powers the overview table).
+    each visual rendered from intent, table preview, or **primary-dataset** bar/line/pie charts when
+    at least two columns exist (first column × second column heuristic). Per-visual SQL is not generated yet.
     """
     base = build_minimal_migrated_dashboard(
         dashboard_title=dashboard_title,
@@ -130,27 +365,89 @@ def build_migrated_dashboard_with_pbi_views(
             }
         )
         y += 2
-        for i, row in enumerate(vrows[:max_visuals_per_page], start=1):
+        page_rows = vrows[:max_visuals_per_page]
+        sorted_rows = sorted(page_rows, key=_row_sort_key)
+        canvas_w = _canvas_width_for_rows(page_rows)
+
+        for i, row in enumerate(sorted_rows, start=1):
             vt = (row.get("visual_type") or "visual").strip()
             intent = (row.get("intent_statement") or "").strip()
             if len(intent) > 900:
                 intent = intent[:897] + "…"
             src = (row.get("source_file") or "").strip()
-            lines = [f"**Visual type:** `{_safe_display_line(vt)}`", ""]
-            lines.append(intent if intent else "_No intent text extracted for this visual._")
-            if src:
-                lines.extend(["", f"_Source file: {src}_"])
-            h = 4 if len(intent) > 280 else 3
-            layout.append(
-                {
-                    "widget": {
-                        "name": _lakeview_widget_name(slug, i),
-                        "multilineTextboxSpec": {"lines": lines},
-                    },
-                    "position": {"x": 0, "y": y, "width": 6, "height": h},
-                }
-            )
-            y += h
+            wname = _lakeview_widget_name(slug, i)
+            target = parity_target_for_visual_type(vt)
+
+            if has_layout_bbox(row):
+                xg, wg, hg = _bbox_to_grid_columns(row, canvas_w)
+            else:
+                xg, wg, hg = 0, 6, 4 if len(intent) > 280 else 3
+
+            if target == ParityGapTarget.lakeview_table_preview:
+                layout.append(
+                    {
+                        "widget": _table_widget_payload(
+                            name=wname,
+                            dataset_name=dataset_name,
+                            column_names=column_names,
+                        ),
+                        "position": {"x": xg, "y": y, "width": wg, "height": hg},
+                    }
+                )
+            elif target == ParityGapTarget.lakeview_chart_placeholder:
+                ch = max(hg, 4)
+                cols_trim = _trim_sql_columns(column_names)
+                title = _chart_frame_title(intent, vt)
+                if len(cols_trim) >= 2:
+                    c0, c1 = cols_trim[0], cols_trim[1]
+                    if is_pie_like_visual(vt):
+                        wj = _pie_chart_widget_payload(
+                            name=wname,
+                            dataset_name=dataset_name,
+                            col_color=c0,
+                            col_angle=c1,
+                            frame_title=title,
+                        )
+                    elif is_line_like_visual(vt):
+                        wj = _line_chart_widget_payload(
+                            name=wname,
+                            dataset_name=dataset_name,
+                            col_x=c0,
+                            col_y=c1,
+                            frame_title=title,
+                        )
+                    else:
+                        wj = _bar_chart_widget_payload(
+                            name=wname,
+                            dataset_name=dataset_name,
+                            col_x=c0,
+                            col_y=c1,
+                            frame_title=title,
+                        )
+                    layout.append(
+                        {
+                            "widget": wj,
+                            "position": {"x": xg, "y": y, "width": wg, "height": max(ch, 5)},
+                        }
+                    )
+                    y += max(ch, 5)
+                    continue
+                layout.append(
+                    {
+                        "widget": _chart_placeholder_widget(wname, vt, intent, src),
+                        "position": {"x": xg, "y": y, "width": wg, "height": ch},
+                    }
+                )
+                y += ch
+                continue
+            else:
+                layout.append(
+                    {
+                        "widget": _intent_multiline_widget(wname, vt, intent, src),
+                        "position": {"x": xg, "y": y, "width": wg, "height": hg},
+                    }
+                )
+            y += hg
 
         extra_pages.append(
             {

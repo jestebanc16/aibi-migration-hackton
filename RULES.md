@@ -4,6 +4,8 @@
 
 This document defines the operating rules, architectural truths, decision criteria, and output expectations for a migration app that analyzes an existing Power BI estate and recommends or generates migrations to Databricks AI/BI Dashboards.[cite:13][cite:20][cite:25][cite:28]
 
+**Generation** of target Lakeview dashboards and Genie spaces is **LLM-assisted** (user-selected workspace **chat serving endpoint**), **grounded** on extracted `.pbit` facts and validated Unity Catalog SQL; **extraction** of those facts remains **deterministic** (ZIP and JSON parse), not model-inferred.
+
 The app must treat migration as **both** a semantic and architectural translation problem **and** an opportunity for **maximum attainable layout- and visual-level fidelity** to source Power BI reports (every page and visual represented in the target model where Databricks AI/BI supports it), without claiming guaranteed pixel-identical runtime or full feature parity.[cite:14][cite:23][cite:25]
 
 ---
@@ -36,12 +38,6 @@ Each source artifact must be decomposed into business questions, KPIs, dimension
 
 If governance currently depends on Power BI workspaces, semantic-model permissions, or service-level controls, the app must attempt to remap that logic into Unity Catalog permissions and governed semantic objects wherever possible.[cite:1][cite:25][cite:28]
 
-### 5. Coexistence is a valid end state
-
-Databricks documents ongoing Power BI integration, which means a partial-replacement strategy is a valid target architecture rather than a failure mode.[cite:20][cite:29]
-
-The app must optimize for estate rationalization and platform fit, not for maximum forced replacement of Power BI artifacts.[cite:14][cite:25]
-
 ---
 
 ## Scope Rules
@@ -54,7 +50,7 @@ The app must optimize for estate rationalization and platform fit, not for maxim
 - Generating a semantic translation plan and dashboard rebuild plan for qualified migration candidates.[cite:23][cite:25]
 - Emitting a **session estate rollup** when multiple source packages are analyzed in one session, aligned with the required estate-level outputs.[cite:14][cite:23]
 - **Automated report-structure and layout fidelity** for analyzed **interactive** Power BI reports: the target AI/BI dashboard must **cover every extracted report page and visual**—ordering, grouping, titles, and **layout coordinates where extractable**—mapped to the closest supported Lakeview widget types and encodings.[cite:11][cite:13][cite:14]
-- **Definitions (product language):** **Blind** means the default pipeline derives pages, visuals, and layout from the **canonical intermediate model** without requiring operators to manually wireframe dashboards first. **Pixel-perfect** means **maximum fidelity subject to Databricks AI/BI capabilities**; gaps (custom visuals, themes or fonts, some interaction patterns, print or **paginated (RDL)** parity, and similar) must appear in a **per-report parity or gap manifest** and feed the **parity-validation backlog**.[cite:11][cite:14][cite:23]
+- **Definitions (product language):** **Blind** means the default pipeline derives pages, visuals, and layout **without a manual wireframe step**: the **user-selected Databricks foundation / chat serving endpoint** proposes Lakeview structure and Genie copy from **deterministically extracted** `.pbit` artifacts (ZIP, `DataModelSchema`, report `Layout` JSON) plus validated Unity Catalog bindings—operators review before publish. **Pixel-perfect** means **maximum fidelity subject to Databricks AI/BI capabilities**; gaps (custom visuals, themes or fonts, some interaction patterns, print or **paginated (RDL)** parity, and similar) must appear in a **per-report parity or gap manifest** (including **LLM vs platform** limitations where relevant) and feed the **parity-validation backlog**.[cite:11][cite:14][cite:23]
 
 ### Out of scope
 
@@ -109,10 +105,13 @@ For every source artifact, the app must extract or infer:
 
 The app must convert each visual into an **analytic intent statement** such as: `monthly gross margin by region with product-category filter and YoY comparison`.[cite:23]
 
-### Analytic intent generation (implementation standard)
+### Migration generation (implementation standard)
 
-- Initial intent must be produced with **deterministic** heuristics using visual type, field wells, axis or legend titles, and known model columns where available.
-- The app must expose those intent strings for **explicit user edit** in the product UI before they drive semantic translation plans, SQL stubs, or dashboard generation. Optional LLM assistance, if present, must not be the only review gate—human-correctable intent remains authoritative for v1.
+- **Lakeview dashboard JSON** and **Genie narrative** (title, description, text instructions, suggested questions, and gap reasoning) are **LLM-assisted** using a **user-chosen Databricks chat-capable serving endpoint** (foundation or custom), invoked with **OpenAI-compatible** chat completions against that endpoint.
+- The model must be **grounded** on **deterministic extraction** only: serialized canonical model(s), report/visual layout facts, Unity Catalog bindings, `DESCRIBE` column lists, and **warehouse-validated** starter SQL. It must **not invent** tables, columns, or measures that are absent from that context.
+- Outputs must be **structured** (JSON): a `lakeview_dashboard` object (full `datasets` + `pages` shape consumable by the Lakeview API) and a `genie` object (`title`, `description`, `text_instruction`, optional `sample_questions`). **Per-visual heuristic intent strings** remain useful as **extracted hints** in the payload but are not the sole generation path.
+- **Human review** before publish: operators choose warehouse, endpoint, and bindings in the app; invalid or non-JSON LLM output fails closed with actionable errors (no silent publish).
+- **Heuristic-only dashboard assembly** may remain available only when explicitly disabled for LLM (e.g. environment flag for fallback); it is not the primary path when LLM migration is enabled.
 
 ---
 
@@ -148,14 +147,16 @@ Dashboard definitions should contain presentation logic, lightweight filters, an
 
 The app must use the following conceptual mappings, while recognizing that they are not feature-identical.[cite:20][cite:25][cite:28]
 
-| Power BI concept | Preferred Databricks target | Rule |
-|---|---|---|
-| Semantic model [cite:27] | Curated Delta tables/views + Unity Catalog business semantics [cite:28][cite:31] | Treat as the primary semantic migration unit |
-| DAX measure [cite:24] | Metric view, SQL metric, or precomputed transformation [cite:28] | Classify before translating |
-| Power Query/Dataflow [cite:2] | SQL transformation / ETL-ELT pipeline on Databricks [cite:20][cite:23] | Move reusable shaping upstream |
-| Report page [cite:24] | AI/BI dashboard page or Genie-enabled analytic flow [cite:13][cite:32] | Map each source page to a dashboard page with visual-for-visual placement where Lakeview supports it; document unsupported cases in the parity manifest |
-| Dashboard tile [cite:2] | Dashboard visual/section [cite:13][cite:19] | Recompose when source dashboard aggregates multiple reports |
-| Workspace/app [cite:1] | Workspace + permissions + Databricks Apps packaging [cite:13][cite:14] | Treat as deployment and access model |
+
+| Power BI concept              | Preferred Databricks target                                                      | Rule                                                                                                                                                    |
+| ----------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Semantic model [cite:27]      | Curated Delta tables/views + Unity Catalog business semantics [cite:28][cite:31] | Treat as the primary semantic migration unit                                                                                                            |
+| DAX measure [cite:24]         | Metric view, SQL metric, or precomputed transformation [cite:28]                 | Classify before translating                                                                                                                             |
+| Power Query/Dataflow [cite:2] | SQL transformation / ETL-ELT pipeline on Databricks [cite:20][cite:23]           | Move reusable shaping upstream                                                                                                                          |
+| Report page [cite:24]         | AI/BI dashboard page or Genie-enabled analytic flow [cite:13][cite:32]           | Map each source page to a dashboard page with visual-for-visual placement where Lakeview supports it; document unsupported cases in the parity manifest |
+| Dashboard tile [cite:2]       | Dashboard visual/section [cite:13][cite:19]                                      | Recompose when source dashboard aggregates multiple reports                                                                                             |
+| Workspace/app [cite:1]        | Workspace + permissions + Databricks Apps packaging [cite:13][cite:14]           | Treat as deployment and access model                                                                                                                    |
+
 
 ---
 
@@ -170,25 +171,27 @@ Every analyzed artifact must end in exactly one disposition for **lifecycle and 
 - `retain_in_power_bi`
 - `redesign_before_migration` [cite:14][cite:23]
 
-The **`effective_disposition`** (after binding and gates) is the controlling disposition for **automation** such as dashboard generation; **`recommended_disposition`** remains the scored hypothesis before binding.
+The `**effective_disposition`** (after binding and gates) is the controlling disposition for **automation** such as dashboard generation; `**recommended_disposition`** remains the scored hypothesis before binding.
 
 ### Recommended default logic
 
-| Pattern | Default disposition | Reason |
-|---|---|---|
-| Simple KPI dashboard on Databricks-backed data [cite:20] | `migrate_now` [cite:13][cite:25] | Strong Lakehouse fit and lower semantic risk |
-| DirectQuery-heavy operational dashboard [cite:5] | `migrate_now` [cite:10][cite:13] | Good candidate for Lakehouse-native live analytics |
-| DAX-heavy finance or planning model [cite:24][cite:33] | `migrate_later` or `retain_in_power_bi` [cite:14][cite:23] | High translation and validation burden |
-| Paginated or print-perfect reporting [cite:11][cite:14] | `retain_in_power_bi` [cite:11][cite:14] | Front-end mismatch for **paginated (RDL)** and print-centric rigs vs interactive AI/BI; in-scope fidelity rules here target **interactive** reports, not identical paginated output |
-| Analyst-facing exploratory dashboard [cite:6][cite:10] | `migrate_now` [cite:13][cite:32] | Strong fit for AI-assisted workflows |
-| Executive dashboard with heavy custom polish [cite:11][cite:19] | `redesign_before_migration` or `retain_in_power_bi` [cite:14] | Requires explicit UX simplification decision |
+
+| Pattern                                                         | Default disposition                                           | Reason                                                                                                                                                                              |
+| --------------------------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Simple KPI dashboard on Databricks-backed data [cite:20]        | `migrate_now` [cite:13][cite:25]                              | Strong Lakehouse fit and lower semantic risk                                                                                                                                        |
+| DirectQuery-heavy operational dashboard [cite:5]                | `migrate_now` [cite:10][cite:13]                              | Good candidate for Lakehouse-native live analytics                                                                                                                                  |
+| DAX-heavy finance or planning model [cite:24][cite:33]          | `migrate_later` or `retain_in_power_bi` [cite:14][cite:23]    | High translation and validation burden                                                                                                                                              |
+| Paginated or print-perfect reporting [cite:11][cite:14]         | `retain_in_power_bi` [cite:11][cite:14]                       | Front-end mismatch for **paginated (RDL)** and print-centric rigs vs interactive AI/BI; in-scope fidelity rules here target **interactive** reports, not identical paginated output |
+| Analyst-facing exploratory dashboard [cite:6][cite:10]          | `migrate_now` [cite:13][cite:32]                              | Strong fit for AI-assisted workflows                                                                                                                                                |
+| Executive dashboard with heavy custom polish [cite:11][cite:19] | `redesign_before_migration` or `retain_in_power_bi` [cite:14] | Requires explicit UX simplification decision                                                                                                                                        |
+
 
 ### Recommended disposition vs effective disposition
 
-- **`recommended_disposition`**: The outcome from classification and scoring **before** Unity Catalog binding is complete (heuristics-only readiness).
-- **`effective_disposition`**: The outcome **after** applying binding completeness and critical coverage rules (for example, fact or dimension tables required by pinned visuals or measures must map to fully qualified `catalog.schema.table` or governed views).
+- `**recommended_disposition`**: The outcome from classification and scoring **before** Unity Catalog binding is complete (heuristics-only readiness).
+- `**effective_disposition`**: The outcome **after** applying binding completeness and critical coverage rules (for example, fact or dimension tables required by pinned visuals or measures must map to fully qualified `catalog.schema.table` or governed views).
 
-The app must persist **both** values per artifact whenever binding is part of the workflow. If `recommended_disposition` is `migrate_now` but required tables remain unmapped or ambiguous, `effective_disposition` must be downgraded (typically to `migrate_later`) and **`binding_blockers`** must list the concrete gaps.
+The app must persist **both** values per artifact whenever binding is part of the workflow. If `recommended_disposition` is `migrate_now` but required tables remain unmapped or ambiguous, `effective_disposition` must be downgraded (typically to `migrate_later`) and `**binding_blockers`** must list the concrete gaps.
 
 **Automatic dashboard generation** (including **data-bound** Lakeview datasets) is permitted only when `effective_disposition` is `migrate_now`, all refuse-when-ambiguous gates pass, SQL validation succeeds for queries that execute against Unity Catalog, and—where the target AI/BI experience **intentionally simplifies** source UX relative to a fidelity-first layout—the operator has recorded **explicit sign-off** per the UX and product rules below. **Layout skeletons** or a **full page-and-visual tree** (including placeholders where SQL is not yet validated) may be emitted per product rules once the canonical model and extractable layout exist, without bypassing gates for **published** data-bound datasets.
 
@@ -281,7 +284,7 @@ Unmapped or invalid Unity Catalog targets for tables or views required by the mi
 
 ## Row-level security and execution identity (v1)
 
-- The app must extract **RLS-related metadata** from the semantic model when present (roles, filter expressions, table permissions) and attach it to the canonical model and **`open_risks`**.
+- The app must extract **RLS-related metadata** from the semantic model when present (roles, filter expressions, table permissions) and attach it to the canonical model and `**open_risks`**.
 - **Version 1 scope:** The app must **not** claim row-level **security parity** between Power BI and Databricks. The `validation_plan` must list RLS as **unmapped** until the operator documents an intended target (for example Unity Catalog row filters, secured views, or workspace-level access) and accepts residual risk.
 - **Execution identity:** AI/BI dashboard datasets run as **Databricks SQL warehouse / interactive identity** (for example the signed-in user under OAuth), not as Power BI role names. The product must document that migrated dashboards inherit **that** access model until a dedicated RLS remapping workflow exists.
 
@@ -360,6 +363,7 @@ Use these rules if Cursor is generating code or decisions for the migration app 
 - Treat Power BI to Databricks AI/BI migration as an **architecture translation workflow** that includes **layout- and visual-level fidelity** as an explicit product goal.[cite:27][cite:28]
 - Always build and persist a **canonical intermediate model** before emitting target assets.[cite:23][cite:24]
 - Never publish **data-bound** dashboard datasets against Unity Catalog before semantic, grain, and permission issues are resolved for those queries; do not bypass `binding_blockers` or SQL validation for executed datasets.[cite:25][cite:28]
+- For **LLM-produced** Lakeview JSON, never publish without the same **SQL probe / DESCRIBE** gates; if the model emits dataset SQL, **override or strip** it with **validated** `starter_sql` for the primary dataset before create/publish. If LLM output is **not valid JSON** or does not match the required shape after a bounded repair attempt, **fail closed** and surface errors in the same spirit as `binding_blockers` (no partial publish of an unvalidated dashboard).
 - After the canonical model exists, the app may emit **layout skeletons** or a **full page-and-visual tree** for Lakeview per product rules; **data-bound** definitions remain subject to the same binding and SQL validation gates before publish.[cite:23][cite:25]
 - Prefer Unity Catalog semantic assets and curated SQL objects over dashboard-local business logic.[cite:25][cite:28][cite:31]
 - Optimize for hybrid coexistence and phased replacement while still pursuing **high page and visual coverage** in target artifacts where in scope—without equating coverage with unsafe semantic shortcuts.[cite:20][cite:29]
@@ -404,13 +408,13 @@ The migration app succeeds when it reduces duplicated semantics, preserves trust
 
 Here are some additional resources that you can use for reference:
 
-https://github.com/topics/powerbi-dashboards
-https://www.linkedin.com/posts/eirini-papakosta_now-easier-than-ever-migrating-a-power-bi-activity-7427728728195223552-LCf1/?utm_medium=ios_app&rcm=ACoAACq1P_EBaylgPAX5lj9M3Q8DhUgd7a51iio&utm_source=social_share_send&utm_campaign=whatsapp
-https://github.com/pedrozanlorensi/pbi-aibi-converter/tree/master
-https://github.com/databricks-solutions/databricks-genie-workbench
-https://github.com/pclee-demo/genie-assessment-toolkit
-https://github.com/databricks-solutions/technical-services-solutions/blob/main/data-warehousing/dbrx-business-semantics/1_CreateMetricView.ipynb
-https://docs.databricks.com/aws/en/business-semantics/metric-views
-https://docs.databricks.com/aws/en/ai-bi/release-notes/2026
-https://docs.databricks.com/aws/en/ai-bi
-https://docs.databricks.com/aws/en/ai-bi/concepts
+[https://github.com/topics/powerbi-dashboards](https://github.com/topics/powerbi-dashboards)
+[https://www.linkedin.com/posts/eirini-papakosta_now-easier-than-ever-migrating-a-power-bi-activity-7427728728195223552-LCf1/?utm_medium=ios_app&rcm=ACoAACq1P_EBaylgPAX5lj9M3Q8DhUgd7a51iio&utm_source=social_share_send&utm_campaign=whatsapp](https://www.linkedin.com/posts/eirini-papakosta_now-easier-than-ever-migrating-a-power-bi-activity-7427728728195223552-LCf1/?utm_medium=ios_app&rcm=ACoAACq1P_EBaylgPAX5lj9M3Q8DhUgd7a51iio&utm_source=social_share_send&utm_campaign=whatsapp)
+[https://github.com/pedrozanlorensi/pbi-aibi-converter/tree/master](https://github.com/pedrozanlorensi/pbi-aibi-converter/tree/master)
+[https://github.com/databricks-solutions/databricks-genie-workbench](https://github.com/databricks-solutions/databricks-genie-workbench)
+[https://github.com/pclee-demo/genie-assessment-toolkit](https://github.com/pclee-demo/genie-assessment-toolkit)
+[https://github.com/databricks-solutions/technical-services-solutions/blob/main/data-warehousing/dbrx-business-semantics/1_CreateMetricView.ipynb](https://github.com/databricks-solutions/technical-services-solutions/blob/main/data-warehousing/dbrx-business-semantics/1_CreateMetricView.ipynb)
+[https://docs.databricks.com/aws/en/business-semantics/metric-views](https://docs.databricks.com/aws/en/business-semantics/metric-views)
+[https://docs.databricks.com/aws/en/ai-bi/release-notes/2026](https://docs.databricks.com/aws/en/ai-bi/release-notes/2026)
+[https://docs.databricks.com/aws/en/ai-bi](https://docs.databricks.com/aws/en/ai-bi)
+[https://docs.databricks.com/aws/en/ai-bi/concepts](https://docs.databricks.com/aws/en/ai-bi/concepts)

@@ -40,3 +40,5 @@ See [databricks.yml](databricks.yml), [app.yaml](app.yaml), [resources/pbi_aibi_
 ## References
 
 See links at the end of [RULES.md](RULES.md).
+
+LLM-assisted deploy also includes excerpts from **[pbi-aibi-converter knowledge](https://github.com/pedrozanlorensi/pbi-aibi-converter/tree/master/app_for_conversions/knowledge)** (vendored under [`aibi_migrator/knowledge/`](aibi_migrator/knowledge/README.md)).

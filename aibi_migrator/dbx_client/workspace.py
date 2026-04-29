@@ -8,6 +8,7 @@ from typing import Any
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
 from databricks.sdk.service.dashboards import Dashboard
+from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 from databricks.sdk.service.sql import StatementState
 from databricks.sdk.service.workspace import ObjectType
 
@@ -25,6 +26,15 @@ class VolumeOption:
     schema_name: str
     name: str
     full_name: str  # catalog.schema.volume
+
+
+@dataclass
+class ServingEndpointOption:
+    """Chat / foundation-model style serving endpoint (for LLM migration)."""
+
+    name: str
+    task: str | None = None
+    state_ready: str | None = None
 
 
 def get_workspace_client() -> WorkspaceClient:
@@ -105,6 +115,166 @@ class WorkspaceResources:
         if not is_dir:
             return False, f"Path exists but is not a directory (type={ot}). Choose a folder path, not a file."
         return True, None
+
+    def list_chat_serving_endpoints(self) -> tuple[list[ServingEndpointOption], str | None]:
+        """
+        List workspace serving endpoints suitable for chat completions (foundation or external chat models).
+
+        Prefers endpoints whose ``task`` suggests chat; if none match, returns all listable endpoints that
+        look ready so the UI can still offer a manual pick.
+        """
+        try:
+            raw = list(self._w.serving_endpoints.list())
+        except Exception as e:  # noqa: BLE001
+            return [], f"Could not list serving endpoints: {e}"
+
+        def _ready_label(ep: Any) -> str | None:
+            st = getattr(ep, "state", None)
+            if not st:
+                return None
+            r = getattr(st, "ready", None)
+            if r is None:
+                return None
+            return str(getattr(r, "value", r))
+
+        def _config_updating(ep: Any) -> bool:
+            st = getattr(ep, "state", None)
+            if not st:
+                return False
+            cu = getattr(st, "config_update", None)
+            if cu is None:
+                return False
+            v = str(getattr(cu, "value", cu))
+            return v == "IN_PROGRESS"
+
+        def _not_ready(ep: Any) -> bool:
+            st = getattr(ep, "state", None)
+            if not st:
+                return False
+            r = getattr(st, "ready", None)
+            if r is None:
+                return False
+            v = str(getattr(r, "value", r))
+            return v == "NOT_READY"
+
+        def _is_chat_task(task: str | None) -> bool:
+            t = (task or "").upper()
+            return "CHAT" in t or "LLM" in t or "COMPLETION" in t
+
+        stable = [e for e in raw if not _config_updating(e)]
+        chatish = [e for e in stable if _is_chat_task(getattr(e, "task", None)) and not _not_ready(e)]
+        pool = chatish if chatish else [e for e in stable if not _not_ready(e)]
+        if not pool:
+            pool = list(raw)
+
+        out: list[ServingEndpointOption] = []
+        for ep in pool:
+            n = getattr(ep, "name", None)
+            if not n:
+                continue
+            out.append(
+                ServingEndpointOption(
+                    name=str(n),
+                    task=getattr(ep, "task", None),
+                    state_ready=_ready_label(ep),
+                )
+            )
+        return sorted(out, key=lambda x: x.name.lower()), None
+
+    @staticmethod
+    def _assistant_text_from_query_response(resp: Any) -> tuple[str | None, str | None]:
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            return None, "Serving endpoint returned no choices"
+        ch0 = choices[0]
+        msg = getattr(ch0, "message", None)
+        if msg is not None:
+            content = getattr(msg, "content", None)
+            if content:
+                return str(content).strip(), None
+        txt = getattr(ch0, "text", None)
+        if txt:
+            return str(txt).strip(), None
+        return None, "Serving endpoint returned empty message content"
+
+    @staticmethod
+    def _serving_error_suggests_omit_temperature(message: str) -> bool:
+        m = message.lower()
+        if "temperature" in m or "top_p" in m or "top p" in m:
+            return True
+        if "does not allow" in m and "parameter" in m:
+            return True
+        return False
+
+    @staticmethod
+    def _serving_error_suggests_omit_max_tokens(message: str) -> bool:
+        m = message.lower()
+        return "max_tokens" in m or "max tokens" in m or "max_completion_tokens" in m
+
+    def query_serving_endpoint_chat(
+        self,
+        endpoint_name: str,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float | None = 0.2,
+        max_tokens: int | None = 16000,
+    ) -> tuple[str | None, str | None]:
+        """
+        OpenAI-style chat completion via ``POST /serving-endpoints/{name}/invocations``.
+
+        Some models (e.g. Claude Opus on certain routes) reject ``temperature`` or ``max_tokens``;
+        this method retries with those fields omitted when the error message indicates an unsupported
+        parameter.
+
+        Returns (assistant_text, error_message).
+        """
+        name = (endpoint_name or "").strip()
+        if not name:
+            return None, "serving endpoint name is empty"
+
+        messages = [
+            ChatMessage(role=ChatMessageRole.SYSTEM, content=system_prompt),
+            ChatMessage(role=ChatMessageRole.USER, content=user_prompt),
+        ]
+
+        t_val = float(temperature) if temperature is not None else None
+        mt_val = int(max_tokens) if max_tokens is not None else None
+
+        configs: list[tuple[float | None, int | None]] = []
+        if t_val is not None:
+            configs.append((t_val, mt_val))
+        if mt_val is not None:
+            configs.append((None, mt_val))
+        configs.append((None, None))
+
+        seen: set[tuple[float | None, int | None]] = set()
+        ordered: list[tuple[float | None, int | None]] = []
+        for c in configs:
+            if c not in seen:
+                seen.add(c)
+                ordered.append(c)
+
+        last_err = ""
+        for t_u, mt_u in ordered:
+            kwargs: dict[str, Any] = {"name": name, "messages": messages}
+            if t_u is not None:
+                kwargs["temperature"] = t_u
+            if mt_u is not None:
+                kwargs["max_tokens"] = mt_u
+            try:
+                resp = self._w.serving_endpoints.query(**kwargs)
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)
+                el = last_err.lower()
+                strip_temp = t_u is not None and self._serving_error_suggests_omit_temperature(last_err)
+                strip_mt = mt_u is not None and self._serving_error_suggests_omit_max_tokens(last_err)
+                if strip_temp or strip_mt:
+                    continue
+                return None, f"Serving endpoint query failed: {last_err}"
+            return self._assistant_text_from_query_response(resp)
+
+        return None, f"Serving endpoint query failed: {last_err}" if last_err else "Serving endpoint query failed"
 
     def list_warehouses(self) -> tuple[list[WarehouseOption], str | None]:
         """Return (warehouses, api_error). api_error is set when the list API fails."""

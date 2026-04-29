@@ -20,6 +20,9 @@ dev = ["pytest>=8"]
 [tool.setuptools.packages.find]
 where = ["."]
 
+[tool.setuptools.package-data]
+aibi_migrator = ["knowledge/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

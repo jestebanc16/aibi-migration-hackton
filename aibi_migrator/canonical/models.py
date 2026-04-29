@@ -43,6 +43,18 @@ class DispositionScores(BaseModel):
     user_change_tolerance: int = Field(ge=0, le=100)
 
 
+class PbitSemanticRelationship(BaseModel):
+    """A relationship edge from the semantic model (DataModelSchema)."""
+
+    name: str | None = None
+    from_table: str | None = None
+    from_column: str | None = None
+    to_table: str | None = None
+    to_column: str | None = None
+    is_active: bool = True
+    cross_filtering_behavior: str | None = None
+
+
 class PbitTableRef(BaseModel):
     """A logical table from the Power BI model."""
 
@@ -50,6 +62,8 @@ class PbitTableRef(BaseModel):
     is_hidden: bool = False
     column_names: list[str] = Field(default_factory=list)
     measure_names: list[str] = Field(default_factory=list)
+    #: ``data_table`` = import/M/direct storage; ``calculated_view`` = calculated table (semantic “view”).
+    semantic_role: str = Field(default="data_table", description="data_table | calculated_view | unknown")
 
 
 class PbitMeasureRef(BaseModel):
@@ -65,12 +79,23 @@ class PbitVisualIntent(BaseModel):
     visual_type: str | None = None
     intent_statement: str
     intent_user_edited: bool = False
+    # Power BI report layout (canvas units); set when Layout JSON is parsed.
+    layout_x: float | None = None
+    layout_y: float | None = None
+    layout_z: float | None = None
+    layout_w: float | None = None
+    layout_h: float | None = None
 
 
 class ParityGapTarget(str, Enum):
     """How a source visual maps to the deployed Lakeview JSON (fidelity track)."""
 
     lakeview_multiline_intent = "lakeview_multiline_intent"
+    lakeview_table_preview = "lakeview_table_preview"
+    lakeview_chart_placeholder = "lakeview_chart_placeholder"
+    lakeview_bar_chart = "lakeview_bar_chart"
+    lakeview_line_chart = "lakeview_line_chart"
+    lakeview_pie_chart = "lakeview_pie_chart"
     gap = "gap"
 
 
@@ -113,9 +138,15 @@ class DeployParityManifest(BaseModel):
         return lines
 
     def summary_counts(self) -> dict[str, int]:
-        mapped = sum(1 for e in self.entries if e.target == ParityGapTarget.lakeview_multiline_intent)
         gaps = sum(1 for e in self.entries if e.target == ParityGapTarget.gap)
-        return {"mapped": mapped, "gap": gaps, "total": len(self.entries)}
+        mapped = len(self.entries) - gaps
+        by_target: dict[str, int] = {}
+        for e in self.entries:
+            k = e.target.value
+            by_target[k] = by_target.get(k, 0) + 1
+        out: dict[str, int] = {"mapped": mapped, "gap": gaps, "total": len(self.entries)}
+        out.update(by_target)
+        return out
 
 
 class PbitCanonicalModel(BaseModel):
@@ -125,6 +156,7 @@ class PbitCanonicalModel(BaseModel):
     source_file_name: str
     tables: list[PbitTableRef] = Field(default_factory=list)
     measures: list[PbitMeasureRef] = Field(default_factory=list)
+    semantic_relationships: list[PbitSemanticRelationship] = Field(default_factory=list)
     relationships_count: int = 0
     has_rls_hints: bool = False
     rls_notes: list[str] = Field(default_factory=list)
